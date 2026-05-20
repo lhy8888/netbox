@@ -62,15 +62,18 @@ class EnhancedPage(Page):
         return page_list
 
 
-def get_paginate_count(request):
+def get_paginate_count(request, per_page_field='per_page'):
     """
     Determine the desired length of a page, using the following in order:
 
-        1. per_page URL query parameter
-        2. Saved user preference
+        1. The `per_page_field` URL query parameter (defaults to `per_page`).
+        2. Saved user preference.
         3. PAGINATE_COUNT global setting.
 
     Return the lesser of the calculated value and MAX_PAGE_SIZE.
+
+    Pass a prefixed field name (e.g. `log-per_page`) to isolate a table from
+    bare `per_page` query parameters intended for another table on the same view.
     """
     config = get_config()
 
@@ -79,9 +82,9 @@ def get_paginate_count(request):
             return min(page_size, config.MAX_PAGE_SIZE)
         return page_size
 
-    if 'per_page' in request.GET:
+    if per_page_field in request.GET:
         try:
-            per_page = int(request.GET.get('per_page'))
+            per_page = int(request.GET.get(per_page_field))
             return _max_allowed(per_page)
         except ValueError:
             pass

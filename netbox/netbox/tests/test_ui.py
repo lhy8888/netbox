@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, TestCase
 
 from circuits.choices import CircuitStatusChoices, VirtualCircuitTerminationRoleChoices
@@ -14,9 +15,9 @@ from core.models import ObjectType
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import Interface, Site
 from netbox.ui import attrs
-from netbox.ui.panels import ObjectsTablePanel
+from netbox.ui.panels import ContextTablePanel, ObjectsTablePanel
 from users.models import ObjectPermission, User
-from utilities.testing import create_test_device
+from utilities.testing import create_paginated_test_table, create_test_device
 from vpn.choices import (
     AuthenticationAlgorithmChoices,
     AuthenticationMethodChoices,
@@ -511,3 +512,83 @@ class ObjectsTablePanelTestCase(TestCase):
         """
         context = self.panel_no_perm.get_context(self._make_context(self.user))
         self.assertFalse(self.panel_no_perm.should_render(context))
+
+
+class ContextTablePanelTestCase(TestCase):
+    """
+    Verify that ContextTablePanel resolves its table key correctly, conditionally
+    renders paginator controls, and does not re-invoke callable resolvers.
+    """
+
+    def _outer_context(self, request, table_key, table):
+        return {
+            'request': request,
+            'object': None,
+            'perms': {},
+            table_key: table,
+        }
+
+    def test_pagination_disabled_by_default(self):
+        """Without pagination=True, the panel renders the table but no paginator controls."""
+        table, request = create_paginated_test_table(prefix='log-')
+        panel = ContextTablePanel('table', title='Log Entries')
+
+        html = panel.render(self._outer_context(request, 'table', table))
+
+        self.assertIn('Log Entries', html)
+        self.assertIn('row 0', html)
+        self.assertNotIn('log-page=', html)
+        self.assertNotIn('aria-label="Page selection"', html)
+
+    def test_pagination_enabled_renders_prefixed_controls(self):
+        """With pagination=True, the panel renders prefixed paginator controls."""
+        table, request = create_paginated_test_table(prefix='log-')
+        panel = ContextTablePanel('table', title='Log Entries', pagination=True)
+
+        html = panel.render(self._outer_context(request, 'table', table))
+
+        self.assertIn('log-page=', html)
+        self.assertNotRegex(html, r'[?&]page=\d')
+
+    def test_panel_renders_with_non_default_table_key(self):
+        """A panel declared with a non-default key still renders when that key is in context."""
+        table, request = create_paginated_test_table()
+        panel = ContextTablePanel('custom_table', title='Custom', pagination=True)
+
+        html = panel.render(self._outer_context(request, 'custom_table', table))
+
+        self.assertNotEqual(html, '')
+        self.assertIn('Custom', html)
+        self.assertRegex(html, r'[?&]page=\d')
+
+    def test_callable_table_resolver_called_once(self):
+        """A callable table resolver is invoked exactly once with the outer context."""
+        table, request = create_paginated_test_table(prefix='log-')
+        calls = []
+
+        def resolver(context):
+            calls.append(context)
+            return table
+
+        panel = ContextTablePanel(resolver, title='Callable', pagination=True)
+        outer = {
+            'request': request,
+            'object': None,
+            'perms': {},
+        }
+
+        html = panel.render(outer)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0], outer)
+        self.assertIn('log-page=', html)
+
+    def test_panel_hidden_when_table_missing(self):
+        """A panel declared against a key that isn't in context renders to empty."""
+        request = RequestFactory().get('/')
+        request.user = AnonymousUser()
+        panel = ContextTablePanel('missing_table', title='Missing')
+
+        html = panel.render({'request': request, 'object': None, 'perms': {}})
+
+        self.assertEqual(html, '')

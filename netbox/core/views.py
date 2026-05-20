@@ -268,7 +268,7 @@ class JobLogView(generic.ObjectView):
     layout = layout.Layout(
         layout.Row(
             layout.Column(
-                ContextTablePanel('table', title=_('Log Entries')),
+                ContextTablePanel('table', title=_('Log Entries'), pagination=True),
                 PluginContentPanel('left_page'),
             ),
         ),
@@ -280,7 +280,7 @@ class JobLogView(generic.ObjectView):
     )
 
     def get_extra_context(self, request, instance):
-        table = JobLogEntryTable(instance.log_entries)
+        table = JobLogEntryTable(instance.log_entries, prefix='log-')
         table.configure(request)
         return {
             'table': table,

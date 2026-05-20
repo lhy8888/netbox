@@ -1,7 +1,9 @@
-{% load helpers %}
+{% load django_tables2 %}
 {% load i18n %}
 
 {% if page %}
+  {# django_tables2's querystring resolves keys as variables, so pg/pp expand to the table's prefixed field names. #}
+  {% with pg=table.prefixed_page_field|default:'page' pp=table.prefixed_per_page_field|default:'per_page' %}
   <div
       class="d-flex justify-content-between align-items-center border-{% if placement == 'top' %}bottom{% else %}top{% endif %} p-2"
       hx-target="closest .htmx-container"
@@ -19,11 +21,11 @@
           {% if page.has_previous %}
             <li class="page-item">
               {% if htmx %}
-                <a href="#" hx-get="{{ table.htmx_url }}{% querystring request page=page.previous_page_number %}" class="page-link" aria-label="{% trans "Previous page" %}">
+                <a href="#" hx-get="{{ table.htmx_url }}{% querystring pg=page.previous_page_number %}" class="page-link" aria-label="{% trans "Previous page" %}">
                   <i class="mdi mdi-chevron-left" aria-hidden="true"></i>
                 </a>
               {% else %}
-                <a href="{% querystring request page=page.previous_page_number %}" class="page-link" aria-label="{% trans "Previous page" %}">
+                <a href="{% querystring pg=page.previous_page_number %}" class="page-link" aria-label="{% trans "Previous page" %}">
                   <i class="mdi mdi-chevron-left" aria-hidden="true"></i>
                 </a>
               {% endif %}
@@ -35,11 +37,11 @@
           {% for p in page.smart_pages %}
             <li class="page-item{% if page.number == p %} active{% endif %}"{% if page.number == p %} aria-current="page"{% endif %}>
               {% if p and htmx %}
-                <a href="#" hx-get="{{ table.htmx_url }}{% querystring request page=p %}" class="page-link" aria-label="{% blocktrans with num=p %}Page {{ num }}{% endblocktrans %}">
+                <a href="#" hx-get="{{ table.htmx_url }}{% querystring pg=p %}" class="page-link" aria-label="{% blocktrans with num=p %}Page {{ num }}{% endblocktrans %}">
                   {{ p }}
                 </a>
               {% elif p %}
-                <a href="{% querystring request page=p %}" class="page-link {% if page.number == p %} active{% endif %}" aria-label="{% blocktrans with num=p %}Page {{ num }}{% endblocktrans %}">
+                <a href="{% querystring pg=p %}" class="page-link {% if page.number == p %} active{% endif %}" aria-label="{% blocktrans with num=p %}Page {{ num }}{% endblocktrans %}">
                   {{ p }}
                 </a>
               {% else %}
@@ -53,11 +55,11 @@
           {% if page.has_next %}
             <li class="page-item">
               {% if htmx %}
-                <a href="#" hx-get="{{ table.htmx_url }}{% querystring request page=page.next_page_number %}" class="page-link" aria-label="{% trans "Next page" %}">
+                <a href="#" hx-get="{{ table.htmx_url }}{% querystring pg=page.next_page_number %}" class="page-link" aria-label="{% trans "Next page" %}">
                   <i class="mdi mdi-chevron-right" aria-hidden="true"></i>
                 </a>
               {% else %}
-                <a href="{% querystring request page=page.next_page_number %}" class="page-link" aria-label="{% trans "Next page" %}">
+                <a href="{% querystring pg=page.next_page_number %}" class="page-link" aria-label="{% trans "Next page" %}">
                   <i class="mdi mdi-chevron-right" aria-hidden="true"></i>
                 </a>
               {% endif %}
@@ -89,9 +91,9 @@
             {% for n in page.paginator.get_page_lengths %}
               <li>
                 {% if htmx %}
-                  <a href="#" hx-get="{{ table.htmx_url }}{% querystring request per_page=n %}" class="dropdown-item">{{ n }}</a>
+                  <a href="#" hx-get="{{ table.htmx_url }}{% querystring pp=n %}" class="dropdown-item">{{ n }}</a>
                 {% else %}
-                  <a href="{% querystring request per_page=n %}" class="dropdown-item">{{ n }}</a>
+                  <a href="{% querystring pp=n %}" class="dropdown-item">{{ n }}</a>
                 {% endif %}
               </li>
             {% endfor %}
@@ -102,4 +104,5 @@
     {# /Pagination options #}
 
   </div>
+  {% endwith %}
 {% endif %}

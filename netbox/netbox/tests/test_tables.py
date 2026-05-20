@@ -5,7 +5,8 @@ from django.test import RequestFactory, TestCase
 from dcim.models import Device, Site
 from dcim.tables import DeviceTable
 from netbox.tables import NetBoxTable, columns
-from utilities.testing import create_tags, create_test_device, create_test_user
+from utilities.paginator import EnhancedPaginator
+from utilities.testing import create_paginated_test_table, create_tags, create_test_device, create_test_user
 
 
 class BaseTableTestCase(TestCase):
@@ -119,3 +120,83 @@ class TagColumnTestCase(TestCase):
             'table': table
         })
         template.render(context)
+
+
+class PaginatorTemplateTestCase(TestCase):
+    """
+    Verify that `inc/paginator.html` emits prefix-aware query parameters when a
+    table is supplied, and falls back to bare `page` / `per_page` when no table
+    is in context (e.g. rack_elevation_list, custom field choice set choices).
+    """
+
+    PAGINATOR_TEMPLATE = (
+        "{% include 'inc/paginator.html' with "
+        "table=table paginator=paginator page=page %}"
+    )
+    NO_TABLE_PAGINATOR_TEMPLATE = (
+        "{% include 'inc/paginator.html' with "
+        "paginator=paginator page=page %}"
+    )
+    PAGE_ONLY_PAGINATOR_TEMPLATE = (
+        "{% include 'inc/paginator.html' with page=page %}"
+    )
+
+    def test_prefixed_paginator_uses_prefixed_query_params(self):
+        """Prefixed tables emit prefixed `page=` and `per_page=` query parameters."""
+        table, request = create_paginated_test_table(prefix='log-')
+
+        html = Template(self.PAGINATOR_TEMPLATE).render(Context({
+            'table': table,
+            'paginator': table.paginator,
+            'page': table.page,
+            'request': request,
+        }))
+
+        self.assertIn('log-page=', html)
+        self.assertNotRegex(html, r'[?&]page=\d')
+        self.assertIn('log-per_page=', html)
+        self.assertNotRegex(html, r'[?&]per_page=\d')
+
+    def test_unprefixed_paginator_uses_bare_query_params(self):
+        """Unprefixed tables continue to emit bare `page=` query parameters."""
+        table, request = create_paginated_test_table()
+
+        html = Template(self.PAGINATOR_TEMPLATE).render(Context({
+            'table': table,
+            'paginator': table.paginator,
+            'page': table.page,
+            'request': request,
+        }))
+
+        self.assertRegex(html, r'[?&]page=\d')
+        self.assertNotIn('log-page=', html)
+
+    def test_paginator_without_table_uses_bare_query_params(self):
+        """Callers that include the partial without a `table` still get bare `page=` links."""
+        request = RequestFactory().get('/')
+        request.user = AnonymousUser()
+        data = list(range(120))
+        paginator = EnhancedPaginator(data, per_page=50)
+        page = paginator.page(1)
+
+        html = Template(self.NO_TABLE_PAGINATOR_TEMPLATE).render(Context({
+            'paginator': paginator,
+            'page': page,
+            'request': request,
+        }))
+
+        self.assertRegex(html, r'[?&]page=\d')
+        self.assertRegex(html, r'[?&]per_page=\d')
+
+    def test_paginator_with_only_page_kwarg(self):
+        """Match `customfieldchoiceset_choices.html`: only `page` is provided."""
+        request = RequestFactory().get('/')
+        request.user = AnonymousUser()
+        paginator = EnhancedPaginator(list(range(120)), per_page=50)
+
+        html = Template(self.PAGE_ONLY_PAGINATOR_TEMPLATE).render(Context({
+            'page': paginator.page(1),
+            'request': request,
+        }))
+
+        self.assertRegex(html, r'[?&]per_page=\d')
