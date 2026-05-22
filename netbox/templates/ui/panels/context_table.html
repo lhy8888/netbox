@@ -1,8 +1,21 @@
 {% extends "ui/panels/_base.html" %}
+{% load helpers %}
 {% load render_table from django_tables2 %}
 
 {% block panel_content %}
-  <div class="table-responsive">
-    {% render_table table 'inc/table.html' %}
-  </div>
+  {% with paginator_placement=preferences|get_key:"pagination.placement" %}
+    {% if pagination and table.page %}
+      {% if paginator_placement == 'top' or paginator_placement == 'both' %}
+        {% include 'inc/paginator.html' with table=table paginator=table.paginator page=table.page placement='top' %}
+      {% endif %}
+    {% endif %}
+    <div class="table-responsive">
+      {% render_table table 'inc/table.html' %}
+    </div>
+    {% if pagination and table.page %}
+      {% if paginator_placement != 'top' %}
+        {% include 'inc/paginator.html' with table=table paginator=table.paginator page=table.page %}
+      {% endif %}
+    {% endif %}
+  {% endwith %}
 {% endblock panel_content %}

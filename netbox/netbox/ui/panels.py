@@ -429,12 +429,18 @@ class ContextTablePanel(ObjectPanel):
         table (str | callable): Either the context key holding the table
             (e.g. "vlan_table") or a callable which accepts the template
             context and returns a table instance.
+        pagination (bool): If True, render paginator controls for the table.
+            Placement (above, below, or both) follows the user's
+            `pagination.placement` preference. Use together with `prefix=`
+            on the table when more than one paginated table can appear on
+            the same view (e.g. plugins).
     """
     template_name = 'ui/panels/context_table.html'
 
-    def __init__(self, table, **kwargs):
+    def __init__(self, table, pagination=False, **kwargs):
         super().__init__(**kwargs)
         self.table = table
+        self.pagination = pagination
 
     def _resolve_table(self, context):
         if callable(self.table):
@@ -445,6 +451,7 @@ class ContextTablePanel(ObjectPanel):
         return {
             **super().get_context(context),
             'table': self._resolve_table(context),
+            'pagination': self.pagination,
         }
 
     def should_render(self, context):

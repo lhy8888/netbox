@@ -1,7 +1,7 @@
 import json
 import urllib.parse
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from django.contrib.contenttypes.models import ContentType
 from django.urls import reverse
@@ -186,6 +186,101 @@ class ObjectChangeTestCase(TestCase):
         objectchange = ObjectChange.objects.first()
         response = self.client.get(objectchange.get_absolute_url())
         self.assertHttpStatus(response, 200)
+
+
+class JobLogViewTestCase(TestCase):
+    user_permissions = (
+        'core.view_job',
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.job = Job.objects.create(
+            name='Test Job',
+            job_id=uuid.uuid4(),
+        )
+        cls.job.log_entries = [
+            {
+                'level': 'info',
+                'message': f'log line {i}',
+                'timestamp': datetime(2026, 1, 1, tzinfo=UTC),
+            }
+            for i in range(120)
+        ]
+        cls.job.save()
+
+    def setUp(self):
+        super().setUp()
+        # UserConfig.set() mutates self.data in place, which can mutate DEFAULT_USER_PREFERENCES
+        # (the signal in users/signals.py initializes data with a shared reference). Assign a
+        # fresh literal instead. Pin per_page so page-boundary assertions don't depend on PAGINATE_COUNT.
+        self.user.config.data = {'pagination': {'per_page': 50}}
+        self.user.config.save()
+
+    def _set_pagination_placement(self, placement):
+        self.user.config.data = {
+            **self.user.config.data,
+            'pagination': {
+                **self.user.config.data.get('pagination', {}),
+                'placement': placement,
+            },
+        }
+        self.user.config.save()
+
+    def test_log_page_renders_pagination_controls(self):
+        """Paginator markup appears when entries exceed one page."""
+        url = reverse('core:job_log', kwargs={'pk': self.job.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, 'log-page=2')
+
+    def test_log_page_prefixed_navigation(self):
+        """The `log-page` query parameter drives the job log table."""
+        url = reverse('core:job_log', kwargs={'pk': self.job.pk})
+        response = self.client.get(url + '?log-page=2')
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, 'log line 60')
+        self.assertNotContains(response, 'log line 0')
+
+    def test_log_page_ignores_unprefixed_query_params(self):
+        """Bare ?page= / ?per_page= do not drive the prefixed log table."""
+        url = reverse('core:job_log', kwargs={'pk': self.job.pk})
+        response = self.client.get(url + '?page=999&per_page=999')
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, 'log line 0')
+        self.assertNotContains(response, 'log line 60')
+
+    def test_log_page_honors_prefixed_per_page(self):
+        """`?log-per_page=N` widens the log table page size."""
+        url = reverse('core:job_log', kwargs={'pk': self.job.pk})
+        response = self.client.get(url + '?log-per_page=100')
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, 'log line 99')
+        self.assertNotContains(response, 'log line 100')
+
+    def test_log_page_ignores_unprefixed_per_page(self):
+        """Bare `?per_page=N` does not widen the prefixed log table."""
+        url = reverse('core:job_log', kwargs={'pk': self.job.pk})
+        response = self.client.get(url + '?per_page=100')
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, 'log line 49')
+        self.assertNotContains(response, 'log line 50')
+
+    def test_log_page_paginator_placement_top(self):
+        """`pagination.placement=top` renders the paginator above the table only."""
+        self._set_pagination_placement('top')
+        url = reverse('core:job_log', kwargs={'pk': self.job.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, 'hx-target="closest .htmx-container"', count=1)
+
+    def test_log_page_paginator_placement_both(self):
+        """`pagination.placement=both` renders the paginator above and below the table."""
+        self._set_pagination_placement('both')
+        url = reverse('core:job_log', kwargs={'pk': self.job.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, 'hx-target="closest .htmx-container"', count=2)
 
 
 class BackgroundTaskTestCase(TestCase):

@@ -1,16 +1,41 @@
 import inspect
 from importlib import import_module
 
+import django_tables2 as tables
+from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
 from netbox.views import generic
+from utilities.paginator import EnhancedPaginator
 
 from .base import TestCase
 
 __all__ = (
     "ModelTableTestCase",
     "TableTestCases",
+    "create_paginated_test_table",
 )
+
+
+class _PaginatedRowsTable(tables.Table):
+    """Single-column django-tables2 table used for paginator template tests."""
+    name = tables.Column()
+
+
+def create_paginated_test_table(prefix='', rows=120, per_page=50):
+    """
+    Build a configured django-tables2 table with synthetic rows for paginator-template
+    tests. Returns (table, request) where the request is an unauthenticated GET to "/".
+    """
+    request = RequestFactory().get('/')
+    request.user = AnonymousUser()
+    data = [{'name': f'row {i}'} for i in range(rows)]
+    table = _PaginatedRowsTable(data, prefix=prefix)
+    tables.RequestConfig(
+        request,
+        paginate={'paginator_class': EnhancedPaginator, 'per_page': per_page},
+    ).configure(table)
+    return table, request
 
 
 class ModelTableTestCase(TestCase):

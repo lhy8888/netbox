@@ -211,7 +211,7 @@ class BaseTable(tables.Table):
         # Paginate the table results
         paginate = {
             'paginator_class': EnhancedPaginator,
-            'per_page': get_paginate_count(request)
+            'per_page': get_paginate_count(request, self.prefixed_per_page_field),
         }
         tables.RequestConfig(request, paginate).configure(self)
 
