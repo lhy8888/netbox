@@ -1,4 +1,5 @@
 from django.test import TestCase
+from model_bakery import baker
 
 from circuits.choices import *
 from circuits.filtersets import *
@@ -6,17 +7,13 @@ from circuits.models import *
 from dcim.choices import InterfaceTypeChoices, LocationStatusChoices
 from dcim.models import (
     Cable,
-    Device,
-    DeviceRole,
-    DeviceType,
     Interface,
     Location,
-    Manufacturer,
     Region,
     Site,
     SiteGroup,
 )
-from ipam.models import ASN, RIR
+from ipam.models import ASN
 from netbox.choices import DistanceUnitChoices
 from tenancy.models import Tenant, TenantGroup
 from utilities.testing import ChangeLoggedFilterSetTests
@@ -29,26 +26,24 @@ class ProviderTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
-        rir = RIR.objects.create(name='RFC 6996', is_private=True)
-        asns = (
-            ASN(asn=64512, rir=rir),
-            ASN(asn=64513, rir=rir),
-            ASN(asn=64514, rir=rir),
-        )
-        ASN.objects.bulk_create(asns)
+        rir = baker.make('ipam.RIR', is_private=True)
+        asns = [
+            baker.make('ipam.ASN', asn=64512 + i, rir=rir)
+            for i in range(3)
+        ]
 
         providers = (
-            Provider(name='Provider 1', slug='provider-1', description='foobar1'),
-            Provider(name='Provider 2', slug='provider-2', description='foobar2'),
-            Provider(name='Provider 3', slug='provider-3'),
-            Provider(name='Provider 4', slug='provider-4'),
-            Provider(name='Provider 5', slug='provider-5'),
+            baker.make('circuits.Provider', name='Provider 1', slug='provider-1', description='foobar1'),
+            baker.make('circuits.Provider', name='Provider 2', slug='provider-2', description='foobar2'),
+            baker.make('circuits.Provider', name='Provider 3', slug='provider-3'),
+            baker.make('circuits.Provider', name='Provider 4', slug='provider-4'),
+            baker.make('circuits.Provider', name='Provider 5', slug='provider-5'),
         )
-        Provider.objects.bulk_create(providers)
         providers[0].asns.set([asns[0]])
         providers[1].asns.set([asns[1]])
         providers[2].asns.set([asns[2]])
 
+        # MPTT models: use .save() directly
         regions = (
             Region(name='Test Region 1', slug='test-region-1'),
             Region(name='Test Region 2', slug='test-region-2'),
@@ -65,22 +60,16 @@ class ProviderTestCase(TestCase, ChangeLoggedFilterSetTests):
             site_group.save()
 
         sites = (
-            Site(name='Test Site 1', slug='test-site-1', region=regions[0], group=site_groups[0]),
-            Site(name='Test Site 2', slug='test-site-2', region=regions[1], group=site_groups[1]),
+            baker.make('dcim.Site', name='Test Site 1', slug='test-site-1', region=regions[0], group=site_groups[0]),
+            baker.make('dcim.Site', name='Test Site 2', slug='test-site-2', region=regions[1], group=site_groups[1]),
         )
-        Site.objects.bulk_create(sites)
 
-        circuit_types = (
-            CircuitType(name='Test Circuit Type 1', slug='test-circuit-type-1'),
-            CircuitType(name='Test Circuit Type 2', slug='test-circuit-type-2'),
-        )
-        CircuitType.objects.bulk_create(circuit_types)
+        circuit_types = baker.make('circuits.CircuitType', _quantity=2)
 
         circuits = (
-            Circuit(provider=providers[0], type=circuit_types[0], cid='Circuit 1'),
-            Circuit(provider=providers[1], type=circuit_types[1], cid='Circuit 2'),
+            baker.make('circuits.Circuit', provider=providers[0], type=circuit_types[0], cid='Circuit 1'),
+            baker.make('circuits.Circuit', provider=providers[1], type=circuit_types[1], cid='Circuit 2'),
         )
-        Circuit.objects.bulk_create(circuits)
 
         circuit_terminations = (
             CircuitTermination(circuit=circuits[0], termination=sites[0], term_side='A'),
@@ -141,11 +130,9 @@ class CircuitTypeTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
-        CircuitType.objects.bulk_create((
-            CircuitType(name='Circuit Type 1', slug='circuit-type-1', description='foobar1'),
-            CircuitType(name='Circuit Type 2', slug='circuit-type-2', description='foobar2'),
-            CircuitType(name='Circuit Type 3', slug='circuit-type-3'),
-        ))
+        baker.make('circuits.CircuitType', name='Circuit Type 1', slug='circuit-type-1', description='foobar1')
+        baker.make('circuits.CircuitType', name='Circuit Type 2', slug='circuit-type-2', description='foobar2')
+        baker.make('circuits.CircuitType', name='Circuit Type 3', slug='circuit-type-3')
 
     def test_q(self):
         params = {'q': 'foobar1'}
@@ -170,162 +157,97 @@ class CircuitTestCase(TestCase, ChangeLoggedFilterSetTests):
 
     @classmethod
     def setUpTestData(cls):
-
-        regions = (
-            Region(name='Test Region 1', slug='test-region-1'),
-            Region(name='Test Region 2', slug='test-region-2'),
-            Region(name='Test Region 3', slug='test-region-3'),
+        from circuits.baker_recipes import (
+            active_circuit,
+            offline_circuit,
+            planned_circuit,
+            provider,
+            provider_account,
+            provider_network,
         )
+
+        # MPTT models: use .save() directly (baker triggers mptt guard)
+        regions = [Region(name=f'Test Region {i}', slug=f'test-region-{i}') for i in range(1, 4)]
         for r in regions:
             r.save()
 
-        site_groups = (
-            SiteGroup(name='Site Group 1', slug='site-group-1'),
-            SiteGroup(name='Site Group 2', slug='site-group-2'),
-            SiteGroup(name='Site Group 3', slug='site-group-3'),
-        )
-        for site_group in site_groups:
-            site_group.save()
+        site_groups = [SiteGroup(name=f'Site Group {i}', slug=f'site-group-{i}') for i in range(1, 4)]
+        for sg in site_groups:
+            sg.save()
 
-        sites = (
-            Site(name='Test Site 1', slug='test-site-1', region=regions[0], group=site_groups[0]),
-            Site(name='Test Site 2', slug='test-site-2', region=regions[1], group=site_groups[1]),
-            Site(name='Test Site 3', slug='test-site-3', region=regions[2], group=site_groups[2]),
-        )
-        Site.objects.bulk_create(sites)
+        tenant_groups = [TenantGroup(name=f'Tenant group {i}', slug=f'tenant-group-{i}') for i in range(1, 4)]
+        for tg in tenant_groups:
+            tg.save()
 
-        tenant_groups = (
-            TenantGroup(name='Tenant group 1', slug='tenant-group-1'),
-            TenantGroup(name='Tenant group 2', slug='tenant-group-2'),
-            TenantGroup(name='Tenant group 3', slug='tenant-group-3'),
-        )
-        for tenantgroup in tenant_groups:
-            tenantgroup.save()
+        # Non-MPTT models: use recipes
+        sites = [
+            baker.make_recipe('dcim.site', region=regions[i], group=site_groups[i])
+            for i in range(3)
+        ]
+        tenants = [
+            baker.make_recipe('tenancy.tenant', group=tenant_groups[i])
+            for i in range(3)
+        ]
+        circuit_types = baker.make_recipe('circuits.circuit_type', _quantity=2)
+        providers = provider.make(_quantity=3)
+        provider_accounts = [
+            provider_account.make(provider=providers[i])
+            for i in range(3)
+        ]
+        provider_networks = provider_network.make(provider=providers[1], _quantity=3)
 
-        tenants = (
-            Tenant(name='Tenant 1', slug='tenant-1', group=tenant_groups[0]),
-            Tenant(name='Tenant 2', slug='tenant-2', group=tenant_groups[1]),
-            Tenant(name='Tenant 3', slug='tenant-3', group=tenant_groups[2]),
-        )
-        Tenant.objects.bulk_create(tenants)
-
-        circuit_types = (
-            CircuitType(name='Test Circuit Type 1', slug='test-circuit-type-1'),
-            CircuitType(name='Test Circuit Type 2', slug='test-circuit-type-2'),
-        )
-        CircuitType.objects.bulk_create(circuit_types)
-
-        providers = (
-            Provider(name='Provider 1', slug='provider-1'),
-            Provider(name='Provider 2', slug='provider-2'),
-            Provider(name='Provider 3', slug='provider-3'),
-        )
-        Provider.objects.bulk_create(providers)
-
-        provider_accounts = (
-            ProviderAccount(name='Provider Account 1', provider=providers[0], account='A'),
-            ProviderAccount(name='Provider Account 2', provider=providers[1], account='B'),
-            ProviderAccount(name='Provider Account 3', provider=providers[2], account='C'),
-        )
-        ProviderAccount.objects.bulk_create(provider_accounts)
-
-        provider_networks = (
-            ProviderNetwork(name='Provider Network 1', provider=providers[1]),
-            ProviderNetwork(name='Provider Network 2', provider=providers[1]),
-            ProviderNetwork(name='Provider Network 3', provider=providers[1]),
-        )
-        ProviderNetwork.objects.bulk_create(provider_networks)
-
-        locations = (
+        # Location is MPTT: use .objects.create()
+        locations = [
             Location.objects.create(
-                site=sites[0], name='Test Location 1', slug='test-location-1',
+                site=sites[i], name=f'Test Location {i + 1}', slug=f'test-location-{i + 1}',
                 status=LocationStatusChoices.STATUS_ACTIVE,
-            ),
-            Location.objects.create(
-                site=sites[1], name='Test Location 2', slug='test-location-2',
-                status=LocationStatusChoices.STATUS_ACTIVE,
-            ),
-        )
+            )
+            for i in range(2)
+        ]
 
-        circuits = (
-            Circuit(
-                provider=providers[0],
-                provider_account=provider_accounts[0],
-                tenant=tenants[0],
-                type=circuit_types[0],
-                cid='Test Circuit 1',
-                install_date='2020-01-01',
-                termination_date='2021-01-01',
-                commit_rate=1000,
-                status=CircuitStatusChoices.STATUS_ACTIVE,
-                description='foobar1',
-                distance=10,
-                distance_unit=DistanceUnitChoices.UNIT_FOOT,
+        # Circuits: recipes encode status; test-specific fields passed as overrides
+        circuits = [
+            active_circuit.make(
+                provider=providers[0], provider_account=provider_accounts[0],
+                tenant=tenants[0], type=circuit_types[0],
+                cid='Test Circuit 1', install_date='2020-01-01', termination_date='2021-01-01',
+                commit_rate=1000, description='foobar1',
+                distance=10, distance_unit=DistanceUnitChoices.UNIT_FOOT,
             ),
-            Circuit(
-                provider=providers[0],
-                provider_account=provider_accounts[0],
-                tenant=tenants[0],
-                type=circuit_types[0],
-                cid='Test Circuit 2',
-                install_date='2020-01-02',
-                termination_date='2021-01-02',
-                commit_rate=2000,
-                status=CircuitStatusChoices.STATUS_ACTIVE,
-                description='foobar2',
-                distance=20,
-                distance_unit=DistanceUnitChoices.UNIT_METER,
+            active_circuit.make(
+                provider=providers[0], provider_account=provider_accounts[0],
+                tenant=tenants[0], type=circuit_types[0],
+                cid='Test Circuit 2', install_date='2020-01-02', termination_date='2021-01-02',
+                commit_rate=2000, description='foobar2',
+                distance=20, distance_unit=DistanceUnitChoices.UNIT_METER,
             ),
-            Circuit(
-                provider=providers[0],
-                provider_account=provider_accounts[1],
-                tenant=tenants[1],
-                type=circuit_types[0],
-                cid='Test Circuit 3',
-                install_date='2020-01-03',
-                termination_date='2021-01-03',
-                commit_rate=3000,
-                status=CircuitStatusChoices.STATUS_PLANNED,
-                distance=30,
-                distance_unit=DistanceUnitChoices.UNIT_METER,
+            planned_circuit.make(
+                provider=providers[0], provider_account=provider_accounts[1],
+                tenant=tenants[1], type=circuit_types[0],
+                cid='Test Circuit 3', install_date='2020-01-03', termination_date='2021-01-03',
+                commit_rate=3000, distance=30, distance_unit=DistanceUnitChoices.UNIT_METER,
             ),
-            Circuit(
-                provider=providers[1],
-                provider_account=provider_accounts[1],
-                tenant=tenants[1],
-                type=circuit_types[1],
-                cid='Test Circuit 4',
-                install_date='2020-01-04',
-                termination_date='2021-01-04',
+            planned_circuit.make(
+                provider=providers[1], provider_account=provider_accounts[1],
+                tenant=tenants[1], type=circuit_types[1],
+                cid='Test Circuit 4', install_date='2020-01-04', termination_date='2021-01-04',
                 commit_rate=4000,
-                status=CircuitStatusChoices.STATUS_PLANNED,
             ),
-            Circuit(
-                provider=providers[1],
-                provider_account=provider_accounts[2],
-                tenant=tenants[2],
-                type=circuit_types[1],
-                cid='Test Circuit 5',
-                install_date='2020-01-05',
-                termination_date='2021-01-05',
+            offline_circuit.make(
+                provider=providers[1], provider_account=provider_accounts[2],
+                tenant=tenants[2], type=circuit_types[1],
+                cid='Test Circuit 5', install_date='2020-01-05', termination_date='2021-01-05',
                 commit_rate=5000,
-                status=CircuitStatusChoices.STATUS_OFFLINE,
             ),
-            Circuit(
-                provider=providers[1],
-                provider_account=provider_accounts[2],
-                tenant=tenants[2],
-                type=circuit_types[1],
-                cid='Test Circuit 6',
-                install_date='2020-01-06',
-                termination_date='2021-01-06',
+            offline_circuit.make(
+                provider=providers[1], provider_account=provider_accounts[2],
+                tenant=tenants[2], type=circuit_types[1],
+                cid='Test Circuit 6', install_date='2020-01-06', termination_date='2021-01-06',
                 commit_rate=6000,
-                status=CircuitStatusChoices.STATUS_OFFLINE,
             ),
-        )
-        Circuit.objects.bulk_create(circuits)
+        ]
 
-        circuit_terminations = ((
+        circuit_terminations = (
             CircuitTermination(circuit=circuits[0], termination=sites[0], term_side='A'),
             CircuitTermination(circuit=circuits[0], termination=locations[0], term_side='Z'),
             CircuitTermination(circuit=circuits[1], termination=sites[1], term_side='A'),
@@ -334,7 +256,7 @@ class CircuitTestCase(TestCase, ChangeLoggedFilterSetTests):
             CircuitTermination(circuit=circuits[3], termination=provider_networks[0], term_side='A'),
             CircuitTermination(circuit=circuits[4], termination=provider_networks[1], term_side='A'),
             CircuitTermination(circuit=circuits[5], termination=provider_networks[2], term_side='A'),
-        ))
+        )
         for ct in circuit_terminations:
             ct.save()
 
@@ -447,42 +369,31 @@ class CircuitTerminationTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
-        sites = (
-            Site(name='Site 1', slug='site-1'),
-            Site(name='Site 2', slug='site-2'),
-            Site(name='Site 3', slug='site-3'),
-        )
-        Site.objects.bulk_create(sites)
+        sites = baker.make('dcim.Site', _quantity=3)
 
-        circuit_types = (
-            CircuitType(name='Circuit Type 1', slug='circuit-type-1'),
-        )
-        CircuitType.objects.bulk_create(circuit_types)
+        circuit_type = baker.make('circuits.CircuitType')
 
         providers = (
-            Provider(name='Provider 1', slug='provider-1'),
-            Provider(name='Provider 2', slug='provider-2'),
-            Provider(name='Provider 3', slug='provider-3'),
+            baker.make('circuits.Provider', name='Provider 1', slug='provider-1'),
+            baker.make('circuits.Provider', name='Provider 2', slug='provider-2'),
+            baker.make('circuits.Provider', name='Provider 3', slug='provider-3'),
         )
-        Provider.objects.bulk_create(providers)
 
         provider_networks = (
-            ProviderNetwork(name='Provider Network 1', provider=providers[0]),
-            ProviderNetwork(name='Provider Network 2', provider=providers[1]),
-            ProviderNetwork(name='Provider Network 3', provider=providers[2]),
+            baker.make('circuits.ProviderNetwork', name='Provider Network 1', provider=providers[0]),
+            baker.make('circuits.ProviderNetwork', name='Provider Network 2', provider=providers[1]),
+            baker.make('circuits.ProviderNetwork', name='Provider Network 3', provider=providers[2]),
         )
-        ProviderNetwork.objects.bulk_create(provider_networks)
 
-        circuits = (
-            Circuit(provider=providers[0], type=circuit_types[0], cid='Circuit 1'),
-            Circuit(provider=providers[1], type=circuit_types[0], cid='Circuit 2'),
-            Circuit(provider=providers[2], type=circuit_types[0], cid='Circuit 3'),
-            Circuit(provider=providers[0], type=circuit_types[0], cid='Circuit 4'),
-            Circuit(provider=providers[1], type=circuit_types[0], cid='Circuit 5'),
-            Circuit(provider=providers[2], type=circuit_types[0], cid='Circuit 6'),
-            Circuit(provider=providers[2], type=circuit_types[0], cid='Circuit 7'),
-        )
-        Circuit.objects.bulk_create(circuits)
+        circuits = [
+            baker.make('circuits.Circuit', provider=providers[0], type=circuit_type, cid='Circuit 1'),
+            baker.make('circuits.Circuit', provider=providers[1], type=circuit_type, cid='Circuit 2'),
+            baker.make('circuits.Circuit', provider=providers[2], type=circuit_type, cid='Circuit 3'),
+            baker.make('circuits.Circuit', provider=providers[0], type=circuit_type, cid='Circuit 4'),
+            baker.make('circuits.Circuit', provider=providers[1], type=circuit_type, cid='Circuit 5'),
+            baker.make('circuits.Circuit', provider=providers[2], type=circuit_type, cid='Circuit 6'),
+            baker.make('circuits.Circuit', provider=providers[2], type=circuit_type, cid='Circuit 7'),
+        ]
 
         circuit_terminations = (
             CircuitTermination(
@@ -614,6 +525,7 @@ class CircuitGroupTestCase(TestCase, ChangeLoggedFilterSetTests):
 
     @classmethod
     def setUpTestData(cls):
+        # MPTT models: use .save() directly
         tenant_groups = (
             TenantGroup(name='Tenant group 1', slug='tenant-group-1'),
             TenantGroup(name='Tenant group 2', slug='tenant-group-2'),
@@ -623,17 +535,23 @@ class CircuitGroupTestCase(TestCase, ChangeLoggedFilterSetTests):
             tenantgroup.save()
 
         tenants = (
-            Tenant(name='Tenant 1', slug='tenant-1', group=tenant_groups[0]),
-            Tenant(name='Tenant 2', slug='tenant-2', group=tenant_groups[1]),
-            Tenant(name='Tenant 3', slug='tenant-3', group=tenant_groups[2]),
+            baker.make('tenancy.Tenant', name='Tenant 1', slug='tenant-1', group=tenant_groups[0]),
+            baker.make('tenancy.Tenant', name='Tenant 2', slug='tenant-2', group=tenant_groups[1]),
+            baker.make('tenancy.Tenant', name='Tenant 3', slug='tenant-3', group=tenant_groups[2]),
         )
-        Tenant.objects.bulk_create(tenants)
 
-        CircuitGroup.objects.bulk_create((
-            CircuitGroup(name='Circuit Group 1', slug='circuit-group-1', description='foobar1', tenant=tenants[0]),
-            CircuitGroup(name='Circuit Group 2', slug='circuit-group-2', description='foobar2', tenant=tenants[1]),
-            CircuitGroup(name='Circuit Group 3', slug='circuit-group-3', tenant=tenants[1]),
-        ))
+        baker.make(
+            'circuits.CircuitGroup',
+            name='Circuit Group 1', slug='circuit-group-1', description='foobar1', tenant=tenants[0],
+        )
+        baker.make(
+            'circuits.CircuitGroup',
+            name='Circuit Group 2', slug='circuit-group-2', description='foobar2', tenant=tenants[1],
+        )
+        baker.make(
+            'circuits.CircuitGroup',
+            name='Circuit Group 3', slug='circuit-group-3', tenant=tenants[1],
+        )
 
     def test_q(self):
         params = {'q': 'foobar1'}
@@ -673,90 +591,45 @@ class CircuitGroupAssignmentTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
-        circuit_groups = (
-            CircuitGroup(name='Circuit Group 1', slug='circuit-group-1'),
-            CircuitGroup(name='Circuit Group 2', slug='circuit-group-2'),
-            CircuitGroup(name='Circuit Group 3', slug='circuit-group-3'),
-        )
-        CircuitGroup.objects.bulk_create(circuit_groups)
+        circuit_groups = baker.make('circuits.CircuitGroup', _quantity=3)
 
-        providers = Provider.objects.bulk_create((
-            Provider(name='Provider 1', slug='provider-1'),
-            Provider(name='Provider 2', slug='provider-2'),
-            Provider(name='Provider 3', slug='provider-3'),
-        ))
-        circuit_type = CircuitType.objects.create(name='Circuit Type 1', slug='circuit-type-1')
+        providers = baker.make('circuits.Provider', _quantity=3)
+        circuit_type = baker.make('circuits.CircuitType')
 
-        circuits = (
-            Circuit(cid='Circuit 1', provider=providers[0], type=circuit_type),
-            Circuit(cid='Circuit 2', provider=providers[1], type=circuit_type),
-            Circuit(cid='Circuit 3', provider=providers[2], type=circuit_type),
-        )
-        Circuit.objects.bulk_create(circuits)
+        circuits = [
+            baker.make('circuits.Circuit', cid=f'Circuit {i + 1}', provider=providers[i], type=circuit_type)
+            for i in range(3)
+        ]
 
-        provider_networks = (
-            ProviderNetwork(name='Provider Network 1', provider=providers[0]),
-            ProviderNetwork(name='Provider Network 2', provider=providers[1]),
-            ProviderNetwork(name='Provider Network 3', provider=providers[2]),
-        )
-        ProviderNetwork.objects.bulk_create(provider_networks)
+        provider_networks = [
+            baker.make('circuits.ProviderNetwork', provider=providers[i])
+            for i in range(3)
+        ]
 
-        virtual_circuit_type = VirtualCircuitType.objects.create(
-            name='Virtual Circuit Type 1',
-            slug='virtual-circuit-type-1'
-        )
-        virtual_circuits = (
-            VirtualCircuit(
-                provider_network=provider_networks[0],
-                cid='Virtual Circuit 1',
-                type=virtual_circuit_type
-            ),
-            VirtualCircuit(
-                provider_network=provider_networks[1],
-                cid='Virtual Circuit 2',
-                type=virtual_circuit_type
-            ),
-            VirtualCircuit(
-                provider_network=provider_networks[2],
-                cid='Virtual Circuit 3',
-                type=virtual_circuit_type
-            ),
-        )
-        VirtualCircuit.objects.bulk_create(virtual_circuits)
+        virtual_circuit_type = baker.make('circuits.VirtualCircuitType')
+        virtual_circuits = [
+            baker.make(
+                'circuits.VirtualCircuit',
+                provider_network=provider_networks[i],
+                cid=f'Virtual Circuit {i + 1}',
+                type=virtual_circuit_type,
+            )
+            for i in range(3)
+        ]
 
-        assignments = (
-            CircuitGroupAssignment(
-                group=circuit_groups[0],
-                member=circuits[0],
-                priority=CircuitPriorityChoices.PRIORITY_PRIMARY
-            ),
-            CircuitGroupAssignment(
-                group=circuit_groups[1],
-                member=circuits[1],
-                priority=CircuitPriorityChoices.PRIORITY_SECONDARY
-            ),
-            CircuitGroupAssignment(
-                group=circuit_groups[2],
-                member=circuits[2],
-                priority=CircuitPriorityChoices.PRIORITY_TERTIARY
-            ),
-            CircuitGroupAssignment(
-                group=circuit_groups[0],
-                member=virtual_circuits[0],
-                priority=CircuitPriorityChoices.PRIORITY_PRIMARY
-            ),
-            CircuitGroupAssignment(
-                group=circuit_groups[1],
-                member=virtual_circuits[1],
-                priority=CircuitPriorityChoices.PRIORITY_SECONDARY
-            ),
-            CircuitGroupAssignment(
-                group=circuit_groups[2],
-                member=virtual_circuits[2],
-                priority=CircuitPriorityChoices.PRIORITY_TERTIARY
-            ),
-        )
-        CircuitGroupAssignment.objects.bulk_create(assignments)
+        for i, priority in enumerate([
+            CircuitPriorityChoices.PRIORITY_PRIMARY,
+            CircuitPriorityChoices.PRIORITY_SECONDARY,
+            CircuitPriorityChoices.PRIORITY_TERTIARY,
+        ]):
+            baker.make(
+                'circuits.CircuitGroupAssignment',
+                group=circuit_groups[i], member=circuits[i], priority=priority,
+            )
+            baker.make(
+                'circuits.CircuitGroupAssignment',
+                group=circuit_groups[i], member=virtual_circuits[i], priority=priority,
+            )
 
     def test_group(self):
         groups = CircuitGroup.objects.all()[:2]
@@ -794,19 +667,11 @@ class ProviderNetworkTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
-        providers = (
-            Provider(name='Provider 1', slug='provider-1'),
-            Provider(name='Provider 2', slug='provider-2'),
-            Provider(name='Provider 3', slug='provider-3'),
-        )
-        Provider.objects.bulk_create(providers)
+        providers = baker.make('circuits.Provider', _quantity=3)
 
-        provider_networks = (
-            ProviderNetwork(name='Provider Network 1', provider=providers[0], description='foobar1'),
-            ProviderNetwork(name='Provider Network 2', provider=providers[1], description='foobar2'),
-            ProviderNetwork(name='Provider Network 3', provider=providers[2]),
-        )
-        ProviderNetwork.objects.bulk_create(provider_networks)
+        baker.make('circuits.ProviderNetwork', name='Provider Network 1', provider=providers[0], description='foobar1')
+        baker.make('circuits.ProviderNetwork', name='Provider Network 2', provider=providers[1], description='foobar2')
+        baker.make('circuits.ProviderNetwork', name='Provider Network 3', provider=providers[2])
 
     def test_q(self):
         params = {'q': 'foobar1'}
@@ -835,19 +700,20 @@ class ProviderAccountTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
-        providers = (
-            Provider(name='Provider 1', slug='provider-1'),
-            Provider(name='Provider 2', slug='provider-2'),
-            Provider(name='Provider 3', slug='provider-3'),
-        )
-        Provider.objects.bulk_create(providers)
+        providers = baker.make('circuits.Provider', _quantity=3)
 
-        provider_accounts = (
-            ProviderAccount(name='Provider Account 1', provider=providers[0], description='foobar1', account='1234'),
-            ProviderAccount(name='Provider Account 2', provider=providers[1], description='foobar2', account='2345'),
-            ProviderAccount(name='Provider Account 3', provider=providers[2], account='3456'),
+        baker.make(
+            'circuits.ProviderAccount',
+            name='Provider Account 1', provider=providers[0], description='foobar1', account='1234',
         )
-        ProviderAccount.objects.bulk_create(provider_accounts)
+        baker.make(
+            'circuits.ProviderAccount',
+            name='Provider Account 2', provider=providers[1], description='foobar2', account='2345',
+        )
+        baker.make(
+            'circuits.ProviderAccount',
+            name='Provider Account 3', provider=providers[2], account='3456',
+        )
 
     def test_q(self):
         params = {'q': 'foobar1'}
@@ -880,11 +746,18 @@ class VirtualCircuitTypeTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
-        VirtualCircuitType.objects.bulk_create((
-            VirtualCircuitType(name='Virtual Circuit Type 1', slug='virtual-circuit-type-1', description='foobar1'),
-            VirtualCircuitType(name='Virtual Circuit Type 2', slug='virtual-circuit-type-2', description='foobar2'),
-            VirtualCircuitType(name='Virtual Circuit Type 3', slug='virtual-circuit-type-3'),
-        ))
+        baker.make(
+            'circuits.VirtualCircuitType',
+            name='Virtual Circuit Type 1', slug='virtual-circuit-type-1', description='foobar1',
+        )
+        baker.make(
+            'circuits.VirtualCircuitType',
+            name='Virtual Circuit Type 2', slug='virtual-circuit-type-2', description='foobar2',
+        )
+        baker.make(
+            'circuits.VirtualCircuitType',
+            name='Virtual Circuit Type 3', slug='virtual-circuit-type-3',
+        )
 
     def test_q(self):
         params = {'q': 'foobar1'}
@@ -910,6 +783,7 @@ class VirtualCircuitTestCase(TestCase, ChangeLoggedFilterSetTests):
     @classmethod
     def setUpTestData(cls):
 
+        # MPTT models: use .save() directly
         tenant_groups = (
             TenantGroup(name='Tenant group 1', slug='tenant-group-1'),
             TenantGroup(name='Tenant group 2', slug='tenant-group-2'),
@@ -919,70 +793,36 @@ class VirtualCircuitTestCase(TestCase, ChangeLoggedFilterSetTests):
             tenantgroup.save()
 
         tenants = (
-            Tenant(name='Tenant 1', slug='tenant-1', group=tenant_groups[0]),
-            Tenant(name='Tenant 2', slug='tenant-2', group=tenant_groups[1]),
-            Tenant(name='Tenant 3', slug='tenant-3', group=tenant_groups[2]),
+            baker.make('tenancy.Tenant', name='Tenant 1', slug='tenant-1', group=tenant_groups[0]),
+            baker.make('tenancy.Tenant', name='Tenant 2', slug='tenant-2', group=tenant_groups[1]),
+            baker.make('tenancy.Tenant', name='Tenant 3', slug='tenant-3', group=tenant_groups[2]),
         )
-        Tenant.objects.bulk_create(tenants)
 
-        providers = (
-            Provider(name='Provider 1', slug='provider-1'),
-            Provider(name='Provider 2', slug='provider-2'),
-            Provider(name='Provider 3', slug='provider-3'),
-        )
-        Provider.objects.bulk_create(providers)
+        providers = baker.make('circuits.Provider', _quantity=3)
 
-        provider_accounts = (
-            ProviderAccount(name='Provider Account 1', provider=providers[0], account='A'),
-            ProviderAccount(name='Provider Account 2', provider=providers[1], account='B'),
-            ProviderAccount(name='Provider Account 3', provider=providers[2], account='C'),
-        )
-        ProviderAccount.objects.bulk_create(provider_accounts)
+        provider_accounts = [
+            baker.make('circuits.ProviderAccount', provider=providers[i])
+            for i in range(3)
+        ]
 
-        provider_networks = (
-            ProviderNetwork(name='Provider Network 1', provider=providers[0]),
-            ProviderNetwork(name='Provider Network 2', provider=providers[1]),
-            ProviderNetwork(name='Provider Network 3', provider=providers[2]),
-        )
-        ProviderNetwork.objects.bulk_create(provider_networks)
+        provider_networks = [
+            baker.make('circuits.ProviderNetwork', provider=providers[i])
+            for i in range(3)
+        ]
 
-        virtual_circuit_types = (
-            VirtualCircuitType(name='Virtual Circuit Type 1', slug='virtual-circuit-type-1'),
-            VirtualCircuitType(name='Virtual Circuit Type 2', slug='virtual-circuit-type-2'),
-            VirtualCircuitType(name='Virtual Circuit Type 3', slug='virtual-circuit-type-3'),
-        )
-        VirtualCircuitType.objects.bulk_create(virtual_circuit_types)
+        virtual_circuit_types = baker.make('circuits.VirtualCircuitType', _quantity=3)
 
-        virutal_circuits = (
-            VirtualCircuit(
-                provider_network=provider_networks[0],
-                provider_account=provider_accounts[0],
-                tenant=tenants[0],
-                cid='Virtual Circuit 1',
-                type=virtual_circuit_types[0],
-                status=CircuitStatusChoices.STATUS_PLANNED,
-                description='virtualcircuit1',
-            ),
-            VirtualCircuit(
-                provider_network=provider_networks[1],
-                provider_account=provider_accounts[1],
-                tenant=tenants[1],
-                cid='Virtual Circuit 2',
-                type=virtual_circuit_types[1],
-                status=CircuitStatusChoices.STATUS_ACTIVE,
-                description='virtualcircuit2',
-            ),
-            VirtualCircuit(
-                provider_network=provider_networks[2],
-                provider_account=provider_accounts[2],
-                tenant=tenants[2],
-                cid='Virtual Circuit 3',
-                type=virtual_circuit_types[2],
-                status=CircuitStatusChoices.STATUS_DEPROVISIONING,
-                description='virtualcircuit3',
-            ),
-        )
-        VirtualCircuit.objects.bulk_create(virutal_circuits)
+        for i, (status, desc) in enumerate([
+            (CircuitStatusChoices.STATUS_PLANNED, 'virtualcircuit1'),
+            (CircuitStatusChoices.STATUS_ACTIVE, 'virtualcircuit2'),
+            (CircuitStatusChoices.STATUS_DEPROVISIONING, 'virtualcircuit3'),
+        ]):
+            baker.make(
+                'circuits.VirtualCircuit',
+                provider_network=provider_networks[i], provider_account=provider_accounts[i],
+                tenant=tenants[i], cid=f'Virtual Circuit {i + 1}',
+                type=virtual_circuit_types[i], status=status, description=desc,
+            )
 
     def test_q(self):
         params = {'q': 'virtualcircuit1'}
@@ -1045,139 +885,61 @@ class VirtualCircuitTerminationTestCase(TestCase, ChangeLoggedFilterSetTests):
 
     @classmethod
     def setUpTestData(cls):
-        manufacturer = Manufacturer.objects.create(name='Manufacturer 1', slug='manufacturer-1')
-        device_type = DeviceType.objects.create(manufacturer=manufacturer, model='Device Type 1')
-        device_role = DeviceRole.objects.create(name='Device Role 1', slug='device-role-1')
-        site = Site.objects.create(name='Site 1', slug='site-1')
+        site = baker.make('dcim.Site')
+        device_type = baker.make('dcim.DeviceType')
+        device_role = baker.make('dcim.DeviceRole')
 
-        devices = (
-            Device(site=site, name='Device 1', device_type=device_type, role=device_role),
-            Device(site=site, name='Device 2', device_type=device_type, role=device_role),
-            Device(site=site, name='Device 3', device_type=device_type, role=device_role),
-        )
-        Device.objects.bulk_create(devices)
+        devices = [
+            baker.make('dcim.Device', site=site, device_type=device_type, role=device_role, name=f'Device {i + 1}')
+            for i in range(3)
+        ]
 
-        virtual_interfaces = (
-            # Device 1
-            Interface(
-                device=devices[0],
-                name='eth0.1',
-                type=InterfaceTypeChoices.TYPE_VIRTUAL
-            ),
-            Interface(
-                device=devices[0],
-                name='eth0.2',
-                type=InterfaceTypeChoices.TYPE_VIRTUAL
-            ),
-            # Device 2
-            Interface(
-                device=devices[1],
-                name='eth0.1',
-                type=InterfaceTypeChoices.TYPE_VIRTUAL
-            ),
-            Interface(
-                device=devices[1],
-                name='eth0.2',
-                type=InterfaceTypeChoices.TYPE_VIRTUAL
-            ),
-            # Device 3
-            Interface(
-                device=devices[2],
-                name='eth0.1',
-                type=InterfaceTypeChoices.TYPE_VIRTUAL
-            ),
-            Interface(
-                device=devices[2],
-                name='eth0.2',
-                type=InterfaceTypeChoices.TYPE_VIRTUAL
-            ),
-        )
-        Interface.objects.bulk_create(virtual_interfaces)
+        virtual_interfaces = []
+        for device in devices:
+            for j in range(2):
+                virtual_interfaces.append(
+                    Interface.objects.create(
+                        device=device,
+                        name=f'eth0.{j + 1}',
+                        type=InterfaceTypeChoices.TYPE_VIRTUAL,
+                    )
+                )
 
-        providers = (
-            Provider(name='Provider 1', slug='provider-1'),
-            Provider(name='Provider 2', slug='provider-2'),
-            Provider(name='Provider 3', slug='provider-3'),
-        )
-        Provider.objects.bulk_create(providers)
-        provider_networks = (
-            ProviderNetwork(provider=providers[0], name='Provider Network 1'),
-            ProviderNetwork(provider=providers[1], name='Provider Network 2'),
-            ProviderNetwork(provider=providers[2], name='Provider Network 3'),
-        )
-        ProviderNetwork.objects.bulk_create(provider_networks)
-        provider_accounts = (
-            ProviderAccount(provider=providers[0], account='Provider Account 1'),
-            ProviderAccount(provider=providers[1], account='Provider Account 2'),
-            ProviderAccount(provider=providers[2], account='Provider Account 3'),
-        )
-        ProviderAccount.objects.bulk_create(provider_accounts)
-        virtual_circuit_type = VirtualCircuitType.objects.create(
-            name='Virtual Circuit Type 1',
-            slug='virtual-circuit-type-1'
-        )
+        providers = baker.make('circuits.Provider', _quantity=3)
+        provider_networks = [
+            baker.make('circuits.ProviderNetwork', provider=providers[i])
+            for i in range(3)
+        ]
+        provider_accounts = [
+            baker.make('circuits.ProviderAccount', provider=providers[i])
+            for i in range(3)
+        ]
+        virtual_circuit_type = baker.make('circuits.VirtualCircuitType')
 
-        virtual_circuits = (
-            VirtualCircuit(
-                provider_network=provider_networks[0],
-                provider_account=provider_accounts[0],
-                cid='Virtual Circuit 1',
-                type=virtual_circuit_type
-            ),
-            VirtualCircuit(
-                provider_network=provider_networks[1],
-                provider_account=provider_accounts[1],
-                cid='Virtual Circuit 2',
-                type=virtual_circuit_type
-            ),
-            VirtualCircuit(
-                provider_network=provider_networks[2],
-                provider_account=provider_accounts[2],
-                cid='Virtual Circuit 3',
-                type=virtual_circuit_type
-            ),
-        )
-        VirtualCircuit.objects.bulk_create(virtual_circuits)
+        virtual_circuits = [
+            baker.make(
+                'circuits.VirtualCircuit',
+                provider_network=provider_networks[i],
+                provider_account=provider_accounts[i],
+                type=virtual_circuit_type,
+            )
+            for i in range(3)
+        ]
 
-        virtual_circuit_terminations = (
-            VirtualCircuitTermination(
-                virtual_circuit=virtual_circuits[0],
-                role=VirtualCircuitTerminationRoleChoices.ROLE_HUB,
-                interface=virtual_interfaces[0],
-                description='termination1'
-            ),
-            VirtualCircuitTermination(
-                virtual_circuit=virtual_circuits[0],
-                role=VirtualCircuitTerminationRoleChoices.ROLE_SPOKE,
-                interface=virtual_interfaces[3],
-                description='termination2'
-            ),
-            VirtualCircuitTermination(
-                virtual_circuit=virtual_circuits[1],
-                role=VirtualCircuitTerminationRoleChoices.ROLE_PEER,
-                interface=virtual_interfaces[1],
-                description='termination3'
-            ),
-            VirtualCircuitTermination(
-                virtual_circuit=virtual_circuits[1],
-                role=VirtualCircuitTerminationRoleChoices.ROLE_PEER,
-                interface=virtual_interfaces[4],
-                description='termination4'
-            ),
-            VirtualCircuitTermination(
-                virtual_circuit=virtual_circuits[2],
-                role=VirtualCircuitTerminationRoleChoices.ROLE_PEER,
-                interface=virtual_interfaces[2],
-                description='termination5'
-            ),
-            VirtualCircuitTermination(
-                virtual_circuit=virtual_circuits[2],
-                role=VirtualCircuitTerminationRoleChoices.ROLE_PEER,
-                interface=virtual_interfaces[5],
-                description='termination6'
-            ),
+        termination_data = (
+            (virtual_circuits[0], VirtualCircuitTerminationRoleChoices.ROLE_HUB, virtual_interfaces[0]),
+            (virtual_circuits[0], VirtualCircuitTerminationRoleChoices.ROLE_SPOKE, virtual_interfaces[3]),
+            (virtual_circuits[1], VirtualCircuitTerminationRoleChoices.ROLE_PEER, virtual_interfaces[1]),
+            (virtual_circuits[1], VirtualCircuitTerminationRoleChoices.ROLE_PEER, virtual_interfaces[4]),
+            (virtual_circuits[2], VirtualCircuitTerminationRoleChoices.ROLE_PEER, virtual_interfaces[2]),
+            (virtual_circuits[2], VirtualCircuitTerminationRoleChoices.ROLE_PEER, virtual_interfaces[5]),
         )
-        VirtualCircuitTermination.objects.bulk_create(virtual_circuit_terminations)
+        for i, (vc, role, iface) in enumerate(termination_data, start=1):
+            baker.make(
+                'circuits.VirtualCircuitTermination',
+                virtual_circuit=vc, role=role, interface=iface,
+                description=f'termination{i}',
+            )
 
     def test_q(self):
         params = {'q': 'termination1'}
