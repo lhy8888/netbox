@@ -42,7 +42,10 @@ class BaseIPField(models.Field):
             raise ValidationError(e)
 
     def get_prep_value(self, value):
-        if not value:
+        # Use an explicit None / empty-string check; `not value` incorrectly treats
+        # the valid zero addresses 0.0.0.0 and :: as empty. Raw int 0 is preserved
+        # as "empty" for backward compatibility (Django's ORM does not pass it here).
+        if value is None or value == '' or (type(value) is int and value == 0):
             return None
         if isinstance(value, list):
             return [str(self.to_python(v)) for v in value]

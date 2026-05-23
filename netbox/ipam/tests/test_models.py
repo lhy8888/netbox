@@ -7,6 +7,7 @@ from netaddr import IPNetwork, IPSet
 from dcim.models import Site, SiteGroup
 from ipam.choices import *
 from ipam.models import *
+from ipam.utils import rebuild_prefixes
 from utilities.data import string_to_ranges
 
 
@@ -165,8 +166,101 @@ class IPRangeTestCase(TestCase):
         with self.assertRaisesMessage(ValidationError, 'Defined addresses overlap'):
             iprange.clean()
 
+    def test_get_child_ips_host_portion(self):
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('10.0.0.2/24'),
+            end_address=IPNetwork('10.0.0.254/24'),
+        )
+
+        ip1 = IPAddress.objects.create(address=IPNetwork('10.0.0.2/32'))
+        ip2 = IPAddress.objects.create(address=IPNetwork('10.0.0.3/24'))
+
+        self.assertEqual(set(iprange.get_child_ips()), {ip1, ip2})
+
+    def test_available_ip_count(self):
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.19/24'),
+        )
+
+        IPAddress.objects.create(address=IPNetwork('192.0.2.12/24'))
+
+        self.assertEqual(iprange.available_ip_count, 9)
+
+    def test_available_ip_count_distinct_hosts(self):
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.19/24'),
+        )
+
+        # Two rows for .10 (different masks) must dedupe to a single occupied host.
+        IPAddress.objects.bulk_create((
+            IPAddress(address=IPNetwork('192.0.2.10/24')),
+            IPAddress(address=IPNetwork('192.0.2.10/32')),
+            IPAddress(address=IPNetwork('192.0.2.11/24')),
+        ))
+
+        self.assertEqual(iprange.available_ip_count, 8)
+
+    def test_available_ip_count_vrf(self):
+        vrf1 = VRF.objects.create(name='VRF 1')
+        vrf2 = VRF.objects.create(name='VRF 2')
+
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.19/24'),
+            vrf=vrf1,
+        )
+
+        IPAddress.objects.create(address=IPNetwork('192.0.2.12/24'), vrf=vrf1)
+        IPAddress.objects.create(address=IPNetwork('192.0.2.13/24'), vrf=vrf2)
+
+        # Only the VRF 1 IP should count.
+        self.assertEqual(iprange.available_ip_count, 9)
+
+    def test_first_available_ip_full(self):
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.11/24'),
+        )
+
+        IPAddress.objects.create(address=IPNetwork('192.0.2.10/24'))
+        IPAddress.objects.create(address=IPNetwork('192.0.2.11/24'))
+
+        self.assertIsNone(iprange.first_available_ip)
+
+    def test_first_available_ip_ipv6(self):
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('::/126'),
+            end_address=IPNetwork('::3/126'),
+        )
+
+        self.assertEqual(iprange.first_available_ip, '::/126')
+
+    def test_utilization_distinct_hosts(self):
+        iprange = IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.19/24'),
+        )
+
+        IPAddress.objects.bulk_create((
+            IPAddress(address=IPNetwork('192.0.2.10/24')),
+            IPAddress(address=IPNetwork('192.0.2.10/32')),
+            IPAddress(address=IPNetwork('192.0.2.11/24')),
+        ))
+
+        # Two distinct hosts in a 10-address range.
+        self.assertEqual(iprange.utilization, 2 / 10 * 100)
+
 
 class PrefixTestCase(TestCase):
+
+    def assertAvailableIPCountMatchesIPSet(self, prefix):
+        """
+        Confirm that the optimized available_ip_count property matches the legacy
+        IPSet-based get_available_ips().size for the supplied prefix.
+        """
+        self.assertEqual(prefix.available_ip_count, prefix.get_available_ips().size)
 
     def test_family_string(self):
         # Test property when prefix is a string
@@ -330,6 +424,202 @@ class PrefixTestCase(TestCase):
 
         self.assertEqual(available_ips, missing_ips)
 
+    def test_available_ip_count_distinct_hosts(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/29'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPAddress.objects.bulk_create((
+            IPAddress(address=IPNetwork('192.0.2.1/29')),
+            IPAddress(address=IPNetwork('192.0.2.1/32')),
+            IPAddress(address=IPNetwork('192.0.2.3/29')),
+        ))
+
+        # Usable hosts in /29: 6. Two unique hosts occupy .1 and .3.
+        self.assertEqual(prefix.available_ip_count, 4)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_populated_ranges(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/29'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPAddress.objects.bulk_create((
+            IPAddress(address=IPNetwork('192.0.2.1/29')),
+            IPAddress(address=IPNetwork('192.0.2.3/29')),  # Inside the populated range; not double-counted.
+        ))
+
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.3/29'),
+            end_address=IPNetwork('192.0.2.4/29'),
+            mark_populated=True,
+        )
+
+        # Usable 6, one IP outside the range at .1, populated range covers .3-.4.
+        # Available: .2, .5, .6.
+        self.assertEqual(prefix.available_ip_count, 3)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_ipv4_pool(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/30'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+            is_pool=True,
+        )
+
+        self.assertEqual(prefix.available_ip_count, 4)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_ipv4_non_pool(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/30'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+            is_pool=False,
+        )
+
+        self.assertEqual(prefix.available_ip_count, 2)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_ipv4_non_pool_ignores_unusable_ips(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/30'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        # Network and broadcast addresses are unusable for non-pool IPv4 prefixes;
+        # an IP assigned to either must not reduce the available count.
+        IPAddress.objects.create(address=IPNetwork('192.0.2.0/30'))
+        IPAddress.objects.create(address=IPNetwork('192.0.2.3/30'))
+
+        self.assertEqual(prefix.available_ip_count, 2)
+        self.assertEqual(prefix.get_first_available_ip(), '192.0.2.1/30')
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_ipv6(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('2001:db8::/126'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        # /126 has 4 addresses; normal IPv6 prefix excludes the first.
+        self.assertEqual(prefix.available_ip_count, 3)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_ipv6_ignores_subnet_router_anycast(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('2001:db8::/126'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        # The subnet-router anycast (::) address is unusable for normal IPv6 prefixes;
+        # an IP assigned there must not reduce the available count.
+        IPAddress.objects.create(address=IPNetwork('2001:db8::/126'))
+
+        self.assertEqual(prefix.available_ip_count, 3)
+        self.assertEqual(prefix.get_first_available_ip(), '2001:db8::1/126')
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_ipv6_127(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('2001:db8::/127'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        self.assertEqual(prefix.available_ip_count, 2)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_ipv6_populated_range(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('2001:db8::/126'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPRange.objects.create(
+            start_address=IPNetwork('2001:db8::1/126'),
+            end_address=IPNetwork('2001:db8::2/126'),
+            mark_populated=True,
+        )
+
+        # Usable IPv6 hosts in /126: ::1, ::2, ::3. Populated: ::1-::2.
+        self.assertEqual(prefix.available_ip_count, 1)
+        self.assertEqual(prefix.get_first_available_ip(), '2001:db8::3/126')
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_overlapping_ranges(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/29'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.1/29'),
+            end_address=IPNetwork('192.0.2.3/29'),
+            mark_populated=True,
+        )
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.2/29'),
+            end_address=IPNetwork('192.0.2.4/29'),
+            mark_populated=True,
+        )
+
+        # Usable hosts: .1-.6 => 6. Populated union: .1-.4 => 4. Available: .5-.6 => 2.
+        self.assertEqual(prefix.available_ip_count, 2)
+        self.assertEqual(prefix.get_first_available_ip(), '192.0.2.5/29')
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_vrf(self):
+        vrf1 = VRF.objects.create(name='VRF 1')
+        vrf2 = VRF.objects.create(name='VRF 2')
+
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/29'),
+            vrf=vrf1,
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPAddress.objects.create(address=IPNetwork('192.0.2.1/29'), vrf=vrf1)
+        IPAddress.objects.create(address=IPNetwork('192.0.2.2/29'), vrf=vrf2)
+
+        # Usable .1-.6 => 6. Only the VRF 1 IP should count.
+        self.assertEqual(prefix.available_ip_count, 5)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_fully_populated(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/30'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        # Populated range covers every usable address (.1-.2 in a non-pool /30).
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.1/30'),
+            end_address=IPNetwork('192.0.2.2/30'),
+            mark_populated=True,
+        )
+
+        # Exercises the early-return paths that skip the child-IP count and
+        # the host-stream iterator entirely.
+        self.assertEqual(prefix.available_ip_count, 0)
+        self.assertIsNone(prefix.get_first_available_ip())
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
+    def test_available_ip_count_container(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/24'),
+            status=PrefixStatusChoices.STATUS_CONTAINER,
+        )
+
+        # A child prefix exists but does not reduce available_ip_count.
+        Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/26'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        self.assertEqual(prefix.available_ip_count, 254)
+        self.assertAvailableIPCountMatchesIPSet(prefix)
+
     def test_get_first_available_prefix(self):
 
         prefixes = Prefix.objects.bulk_create((
@@ -368,6 +658,42 @@ class PrefixTestCase(TestCase):
         parent_prefix = Prefix.objects.create(prefix=IPNetwork('2001:db8:500:5::/127'))
         self.assertEqual(parent_prefix.get_first_available_ip(), '2001:db8:500:5::/127')
 
+    def test_get_first_available_ip_ipv6_zero_address(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('::/126'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        # Normal IPv6 prefixes exclude the subnet-router anycast address ::.
+        self.assertEqual(prefix.get_first_available_ip(), '::1/126')
+
+    def test_get_first_available_ip_populated_ranges(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/29'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPAddress.objects.create(address=IPNetwork('192.0.2.1/29'))
+
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.2/29'),
+            end_address=IPNetwork('192.0.2.3/29'),
+            mark_populated=True,
+        )
+
+        self.assertEqual(prefix.get_first_available_ip(), '192.0.2.4/29')
+
+    def test_get_first_available_ip_full(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/30'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPAddress.objects.create(address=IPNetwork('192.0.2.1/30'))
+        IPAddress.objects.create(address=IPNetwork('192.0.2.2/30'))
+
+        self.assertIsNone(prefix.get_first_available_ip())
+
     def test_get_utilization_container(self):
         prefixes = (
             Prefix(prefix=IPNetwork('10.0.0.0/24'), status=PrefixStatusChoices.STATUS_CONTAINER),
@@ -396,6 +722,94 @@ class PrefixTestCase(TestCase):
             mark_utilized=True
         )
         self.assertEqual(prefix.get_utilization(), 64 / 254 * 100)  # ~25% utilization
+
+    def test_get_utilization_distinct_hosts(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/24'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPAddress.objects.bulk_create((
+            IPAddress(address=IPNetwork('192.0.2.10/24')),
+            IPAddress(address=IPNetwork('192.0.2.10/32')),
+            IPAddress(address=IPNetwork('192.0.2.11/24')),
+        ))
+
+        # Two unique occupied hosts over 254 usable IPv4 addresses.
+        self.assertEqual(prefix.get_utilization(), 2 / 254 * 100)
+
+    def test_get_utilization_utilized_ranges(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/24'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.19/24'),
+            mark_utilized=True,
+        )
+
+        IPAddress.objects.bulk_create((
+            IPAddress(address=IPNetwork('192.0.2.1/24')),
+            IPAddress(address=IPNetwork('192.0.2.10/24')),
+            IPAddress(address=IPNetwork('192.0.2.11/24')),
+            IPAddress(address=IPNetwork('192.0.2.20/24')),
+        ))
+
+        # Utilized range contributes 10 hosts; IPs inside the range are not double-counted.
+        # Outside IPs: .1 and .20 => 2 more.
+        self.assertEqual(prefix.get_utilization(), 12 / 254 * 100)
+
+    def test_get_utilization_overlapping_utilized_ranges(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/24'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.10/24'),
+            end_address=IPNetwork('192.0.2.19/24'),
+            mark_utilized=True,
+        )
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.15/24'),
+            end_address=IPNetwork('192.0.2.24/24'),
+            mark_utilized=True,
+        )
+
+        # Union is .10-.24 => 15 hosts, not 20.
+        self.assertEqual(prefix.get_utilization(), 15 / 254 * 100)
+
+    def test_get_utilization_fully_utilized_range(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('192.0.2.0/24'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        # Utilized range covers every usable host (.1-.254 in a non-pool /24).
+        IPRange.objects.create(
+            start_address=IPNetwork('192.0.2.1/24'),
+            end_address=IPNetwork('192.0.2.254/24'),
+            mark_utilized=True,
+        )
+
+        # Exercises the early-return path that skips the child-IP count entirely.
+        self.assertEqual(prefix.get_utilization(), 100)
+
+    def test_get_utilization_ipv6_utilized_range(self):
+        prefix = Prefix.objects.create(
+            prefix=IPNetwork('2001:db8::/126'),
+            status=PrefixStatusChoices.STATUS_ACTIVE,
+        )
+
+        IPRange.objects.create(
+            start_address=IPNetwork('2001:db8::1/126'),
+            end_address=IPNetwork('2001:db8::2/126'),
+            mark_utilized=True,
+        )
+
+        self.assertEqual(prefix.get_utilization(), 2 / 4 * 100)
 
     #
     # Uniqueness enforcement tests
@@ -622,6 +1036,48 @@ class PrefixHierarchyTestCase(TestCase):
         self.assertEqual(prefixes[3]._depth, 2)
         self.assertEqual(prefixes[3]._children, 0)
 
+    def test_rebuild_prefixes_accepts_queryset(self):
+        # Wipe the depth/children precomputed by setUpTestData so we can observe the rebuild.
+        Prefix.objects.update(_depth=0, _children=0)
+
+        rebuild_prefixes(Prefix.objects.filter(vrf__isnull=True))
+
+        top = Prefix.objects.get(prefix='10.0.0.0/8')
+        mid = Prefix.objects.get(prefix='10.0.0.0/16')
+        leaf = Prefix.objects.get(prefix='10.0.0.0/24')
+        self.assertEqual((top._depth, top._children), (0, 2))
+        self.assertEqual((mid._depth, mid._children), (1, 1))
+        self.assertEqual((leaf._depth, leaf._children), (2, 0))
+
+    def test_rebuild_prefixes_accepts_vrf_identifier(self):
+        # Backward-compatible signature: None means "global table".
+        Prefix.objects.update(_depth=0, _children=0)
+
+        rebuild_prefixes(None)
+
+        top = Prefix.objects.get(prefix='10.0.0.0/8')
+        mid = Prefix.objects.get(prefix='10.0.0.0/16')
+        leaf = Prefix.objects.get(prefix='10.0.0.0/24')
+        self.assertEqual((top._depth, top._children), (0, 2))
+        self.assertEqual((mid._depth, mid._children), (1, 1))
+        self.assertEqual((leaf._depth, leaf._children), (2, 0))
+
+    def test_rebuild_prefixes_accepts_vrf_pk(self):
+        # Backward-compatible signature: a VRF pk filters to that VRF's prefixes.
+        vrf = VRF.objects.create(name='VRF 1')
+        Prefix.objects.create(prefix=IPNetwork('192.0.2.0/24'), vrf=vrf)
+        Prefix.objects.create(prefix=IPNetwork('192.0.2.0/25'), vrf=vrf)
+
+        # Reset depth/children so the rebuild has something to restore.
+        Prefix.objects.filter(vrf=vrf).update(_depth=0, _children=0)
+
+        rebuild_prefixes(vrf.pk)
+
+        parent = Prefix.objects.get(prefix='192.0.2.0/24', vrf=vrf)
+        child = Prefix.objects.get(prefix='192.0.2.0/25', vrf=vrf)
+        self.assertEqual((parent._depth, parent._children), (0, 1))
+        self.assertEqual((child._depth, child._children), (1, 0))
+
 
 class IPAddressTestCase(TestCase):
 
@@ -716,6 +1172,20 @@ class IPAddressTestCase(TestCase):
 
         with self.assertRaisesMessage(ValidationError, 'Cannot create IP address'):
             ipaddress.clean()
+
+    def test_populated_range_blocks_ip_with_different_mask(self):
+        # The populated-range check compares by host portion, so a different mask
+        # must not let an IPAddress slip past validation.
+        IPRange.objects.create(
+            start_address=IPNetwork('10.0.0.2/24'),
+            end_address=IPNetwork('10.0.0.254/24'),
+            mark_populated=True,
+        )
+
+        ip = IPAddress(address=IPNetwork('10.0.0.2/32'))
+
+        with self.assertRaises(ValidationError):
+            ip.full_clean()
 
 
 class VLANGroupTestCase(TestCase):

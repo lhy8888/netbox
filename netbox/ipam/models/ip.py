@@ -16,6 +16,16 @@ from ipam.fields import IPAddressField, IPNetworkField
 from ipam.lookups import Host
 from ipam.managers import IPAddressManager
 from ipam.querysets import PrefixQuerySet
+from ipam.utils import (
+    count_distinct_ip_hosts,
+    count_distinct_ip_hosts_outside_intervals,
+    count_ip_intervals,
+    filter_ip_hosts_between,
+    find_first_available_ip,
+    get_iprange_intervals,
+    get_usable_ip_bounds,
+    merge_ip_intervals,
+)
 from ipam.validators import DNSValidator
 from netbox.config import get_config
 from netbox.models import OrganizationalModel, PrimaryModel
@@ -479,14 +489,49 @@ class Prefix(ContactsMixin, GetAvailablePrefixesMixin, CachedScopeMixin, Primary
 
         return available_ips
 
+    @property
+    def available_ip_count(self):
+        """
+        Return the number of available IPs without constructing the full IPSet.
+
+        Intended for summary display (e.g. the Prefix detail Addressing panel).
+        get_available_ips() remains available for callers that need the actual set.
+        """
+        first_ip, last_ip = get_usable_ip_bounds(self)
+        usable_size = int(last_ip) - int(first_ip) + 1
+
+        populated_intervals = merge_ip_intervals(
+            get_iprange_intervals(self.get_child_ranges(mark_populated=True), first_ip, last_ip)
+        )
+        populated_count = count_ip_intervals(populated_intervals)
+
+        # Populated ranges already cover the usable span; skip the child-IP count entirely.
+        if populated_count >= usable_size:
+            return 0
+
+        child_ips = filter_ip_hosts_between(self.get_child_ips(), first_ip, last_ip)
+        child_ip_count = count_distinct_ip_hosts_outside_intervals(
+            child_ips, populated_intervals, self.family,
+        )
+
+        return max(usable_size - populated_count - child_ip_count, 0)
+
     def get_first_available_ip(self):
         """
         Return the first available IP within the prefix (or None).
         """
-        available_ips = self.get_available_ips()
-        if not available_ips:
+        first_ip, last_ip = get_usable_ip_bounds(self)
+
+        first_available_ip = find_first_available_ip(
+            first_ip=first_ip,
+            last_ip=last_ip,
+            ip_queryset=self.get_child_ips(),
+            range_queryset=self.get_child_ranges(mark_populated=True),
+        )
+
+        if first_available_ip is None:
             return None
-        return '{}/{}'.format(next(available_ips.__iter__()), self.prefix.prefixlen)
+        return f'{first_available_ip}/{self.prefix.prefixlen}'
 
     def get_utilization(self):
         """
@@ -504,17 +549,23 @@ class Prefix(ContactsMixin, GetAvailablePrefixesMixin, CachedScopeMixin, Primary
             child_prefixes = netaddr.IPSet([p.prefix for p in queryset])
             utilization = float(child_prefixes.size) / self.prefix.size * 100
         else:
-            # Compile an IPSet to avoid counting duplicate IPs
-            child_ips = netaddr.IPSet()
-            for iprange in self.get_child_ranges().filter(mark_utilized=True):
-                child_ips.add(iprange.range)
-            for ip in self.get_child_ips():
-                child_ips.add(ip.address.ip)
-
             prefix_size = self.prefix.size
             if self.prefix.version == 4 and self.prefix.prefixlen < 31 and not self.is_pool:
                 prefix_size -= 2
-            utilization = float(child_ips.size) / prefix_size * 100
+            utilized_intervals = merge_ip_intervals(
+                get_iprange_intervals(self.get_child_ranges(mark_utilized=True))
+            )
+            utilized_range_count = count_ip_intervals(utilized_intervals)
+
+            # Utilized ranges already saturate the prefix; skip the child-IP count.
+            if utilized_range_count >= prefix_size:
+                return 100
+
+            child_ip_count = count_distinct_ip_hosts_outside_intervals(
+                self.get_child_ips(), utilized_intervals, self.family,
+            )
+
+            utilization = float(utilized_range_count + child_ip_count) / prefix_size * 100
 
         return min(utilization, 100)
 
@@ -582,6 +633,16 @@ class IPRange(ContactsMixin, PrimaryModel):
 
     class Meta:
         ordering = (F('vrf').asc(nulls_first=True), 'start_address', 'pk')  # (vrf, start_address) may be non-unique
+        indexes = (
+            models.Index(
+                Cast(Host('start_address'), output_field=IPAddressField()),
+                name='ipam_iprange_start_host',
+            ),
+            models.Index(
+                Cast(Host('end_address'), output_field=IPAddressField()),
+                name='ipam_iprange_end_host',
+            ),
+        )
         verbose_name = _('IP range')
         verbose_name_plural = _('IP ranges')
 
@@ -713,10 +774,10 @@ class IPRange(ContactsMixin, PrimaryModel):
         """
         Return all IPAddresses within this IPRange and VRF.
         """
-        return IPAddress.objects.filter(
-            address__gte=self.start_address,
-            address__lte=self.end_address,
-            vrf=self.vrf
+        return filter_ip_hosts_between(
+            IPAddress.objects.filter(vrf=self.vrf),
+            self.start_address.ip,
+            self.end_address.ip,
         )
 
     def get_available_ips(self):
@@ -731,18 +792,36 @@ class IPRange(ContactsMixin, PrimaryModel):
 
         return netaddr.IPSet(range) - child_ips
 
-    @cached_property
+    @property
+    def available_ip_count(self):
+        """
+        Return the number of available IPs without constructing the full IPSet.
+        """
+        if self.mark_populated:
+            return 0
+
+        return max(self.size - count_distinct_ip_hosts(self.get_child_ips()), 0)
+
+    @property
     def first_available_ip(self):
         """
         Return the first available IP within the range (or None).
         """
-        available_ips = self.get_available_ips()
-        if not available_ips:
+        if self.mark_populated:
             return None
 
-        return '{}/{}'.format(next(available_ips.__iter__()), self.start_address.prefixlen)
+        first_available_ip = find_first_available_ip(
+            first_ip=self.start_address.ip,
+            last_ip=self.end_address.ip,
+            ip_queryset=self.get_child_ips(),
+        )
 
-    @cached_property
+        if first_available_ip is None:
+            return None
+
+        return f'{first_available_ip}/{self.start_address.prefixlen}'
+
+    @property
     def utilization(self):
         """
         Determine the utilization of the range and return it as a percentage.
@@ -750,11 +829,7 @@ class IPRange(ContactsMixin, PrimaryModel):
         if self.mark_utilized:
             return 100
 
-        # Compile an IPSet to avoid counting duplicate IPs
-        child_count = netaddr.IPSet([
-            ip.address.ip for ip in self.get_child_ips()
-        ]).size
-
+        child_count = count_distinct_ip_hosts(self.get_child_ips())
         return min(float(child_count) / self.size * 100, 100)
 
 
@@ -948,10 +1023,10 @@ class IPAddress(ContactsMixin, PrimaryModel):
 
             # Disallow the creation of IPAddresses within an IPRange with mark_populated=True
             parent_range_qs = IPRange.objects.filter(
-                start_address__lte=self.address,
-                end_address__gte=self.address,
+                start_address__host__inet__lte=self.address.ip,
+                end_address__host__inet__gte=self.address.ip,
                 vrf=self.vrf,
-                mark_populated=True
+                mark_populated=True,
             )
             if not self.pk and (parent_range := parent_range_qs.first()):
                 raise ValidationError({
