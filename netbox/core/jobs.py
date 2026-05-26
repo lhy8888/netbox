@@ -209,7 +209,8 @@ class SystemHousekeepingJob(JobRunner):
             response = requests.get(
                 url=settings.RELEASE_CHECK_URL,
                 headers={'Accept': 'application/vnd.github.v3+json'},
-                proxies=resolve_proxies(url=settings.RELEASE_CHECK_URL)
+                proxies=resolve_proxies(url=settings.RELEASE_CHECK_URL),
+                timeout=5
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as exc:
