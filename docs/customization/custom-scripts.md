@@ -18,7 +18,7 @@ They can also be used as a mechanism for validating the integrity of data within
 Custom scripts are Python code which exists outside the NetBox code base, so they can be updated and changed without interfering with the core NetBox installation. And because they're completely custom, there is no inherent limitation on what a script can accomplish.
 
 !!! danger "Only install trusted scripts"
-    Custom scripts have unrestricted access to change anything in the database and are inherently unsafe and should only be installed and run from trusted sources.  You should also review and set permissions for who can run scripts if the script can modify any data.
+    Custom scripts have unrestricted access to change anything in the database and are inherently unsafe and should only be installed and run from trusted sources. Permission to upload or modify script modules should be treated as permission to execute trusted Python code on the NetBox server as the NetBox process user. You should also review and set permissions for who can upload, modify, and run scripts if the script can modify any data.
 
 
 ## Writing Custom Scripts
@@ -401,6 +401,9 @@ A complete date & time. Returns a `datetime.datetime` object.
 ## Uploading Scripts via the API
 
 Script modules can be uploaded to NetBox via the REST API by sending a `multipart/form-data` POST request to `/api/extras/scripts/upload/`. The caller must have the `extras.add_scriptmodule` and `core.add_managedfile` permissions.
+
+!!! danger "Script upload permissions"
+    Uploading a script module installs Python code that will be loaded by NetBox. Grant `extras.add_scriptmodule`, `extras.change_scriptmodule`, and related managed file permissions only to fully trusted administrators.
 
 ```no-highlight
 curl -X POST \
